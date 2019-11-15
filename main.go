@@ -6,13 +6,22 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 
 	"golang.org/x/net/html"
 )
 
 func main() {
+	port := env("PORT", "5000")
 	http.Handle("/", &readium{})
-	http.ListenAndServe(":8000", nil)
+	http.ListenAndServe(":"+port, nil)
+}
+
+func env(name, fallback string) string {
+	if v, ok := os.LookupEnv(name); ok {
+		return v
+	}
+	return fallback
 }
 
 type readium struct {
