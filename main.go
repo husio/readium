@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 
 	"golang.org/x/net/html"
 )
@@ -26,27 +27,66 @@ func env(name, fallback string) string {
 
 type readium struct {
 	client http.Client
+	mu     sync.Mutex
+	cache  map[string]*page
+}
+
+type page struct {
+	hits    int
+	code    int
+	content string
 }
 
 func (rd *readium) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	resp, err := rd.client.Get("https://medium.com" + r.URL.Path)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if len(r.URL.Path) < 2 {
+		io.WriteString(w, `<!doctype html>Hello.`)
 		return
 	}
-	defer resp.Body.Close()
 
-	w.WriteHeader(resp.StatusCode)
-	io.WriteString(w, `<!doctype html><body>
+	rd.mu.Lock()
+	defer rd.mu.Unlock()
+
+	p, ok := rd.cache[r.URL.Path]
+	if !ok {
+		resp, err := rd.client.Get("https://medium.com" + r.URL.Path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		var b bytes.Buffer
+		b.WriteString(`<!doctype html><body>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style type="text/css">
 body{ margin:40px auto; max-width:800px; line-height:1.6; font-size:18px; padding:0 10px; }
 h1,h2,h3 { line-height:1.2 }
 img { max-height: 400px; max-width: 400px; }
 </style>
-	`)
-	out, _ := extract(resp.Body)
-	w.Write(out)
+		`)
+		out, _ := extract(resp.Body)
+		b.Write(out)
+
+		// Poor man's lru ¯\_(ツ)_/¯
+		if len(rd.cache) > 200 {
+			rd.cache = nil
+		}
+		if rd.cache == nil {
+			rd.cache = make(map[string]*page)
+		}
+		p = &page{
+			code:    resp.StatusCode,
+			content: b.String(),
+		}
+		rd.cache[r.URL.Path] = p
+	}
+
+	p.hits++
+	w.Header().Add("x-cache-hits", fmt.Sprint(p.hits))
+	w.Header().Add("x-cache-size", fmt.Sprint(len(rd.cache)))
+
+	w.WriteHeader(p.code)
+	io.WriteString(w, p.content)
 }
 
 func extract(body io.Reader) ([]byte, error) {
